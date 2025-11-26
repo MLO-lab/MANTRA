@@ -17,6 +17,12 @@ leidenalg = "^0.10.2"
 pynndescent = "^0.5.11"
 scikit-learn = "^1.4.0"
 scanpy = "^1.9.8"
+tensorly = "^0.8.1"
+scipy = "^1.14.1"
+gseapy = "^1.1.5"
+scikit-misc = "^0.5.1"
+rpy2 = "^3.5.17"
+mygene = "^3.2.2"
 
 [tool.poetry.group.dev.dependencies]
 pyro-ppl = "^1.8.6"

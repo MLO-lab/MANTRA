@@ -51,7 +51,7 @@ def compute_absolute_correlation(a: torch.Tensor, b: torch.Tensor) -> float:
 @pytest.fixture(scope="module")
 def golden_references():
     """Load golden reference values."""
-    golden_path = Path(__file__).parent.parent.parent / "tests" / "golden_references.pkl"
+    golden_path = Path(__file__).parent / "golden_references.pkl"
 
     if not golden_path.exists():
         pytest.skip(

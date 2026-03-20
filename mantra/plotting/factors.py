@@ -11,24 +11,6 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def rmse_loss(yhat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Compute Root Mean Squared Error.
-
-    Parameters
-    ----------
-    yhat : torch.Tensor
-        Predicted values
-    y : torch.Tensor
-        True values
-
-    Returns
-    -------
-    torch.Tensor
-        RMSE value
-    """
-    return torch.sqrt(torch.mean((yhat - y) ** 2))
-
-
 def distplots(
     data: dict[str, torch.Tensor],
     keyorder: list[str],

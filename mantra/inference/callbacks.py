@@ -14,6 +14,25 @@ logger = logging.getLogger(__name__)
 class Callback:
     """Base class for training callbacks."""
 
+    def __call__(self, history: list[float]) -> bool:
+        """Make callbacks callable with the fit() signature.
+
+        Extracts epoch and loss from the history and delegates to on_epoch_end.
+
+        Parameters
+        ----------
+        history : List[float]
+            Full loss history
+
+        Returns
+        -------
+        bool
+            Whether to stop training early
+        """
+        epoch = len(history) - 1
+        loss = history[-1]
+        return self.on_epoch_end(epoch, loss, history)
+
     def on_epoch_end(
         self,
         epoch: int,

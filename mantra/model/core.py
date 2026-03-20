@@ -106,8 +106,8 @@ class MANTRA(PyroModule):
 
     def __init__(
         self,
-        observations: torch.Tensor | list[torch.Tensor],
-        n_features: list[int],
+        observations: torch.Tensor | np.ndarray | list[torch.Tensor | np.ndarray],
+        n_features: list[int] | None = None,
         outcome_obs: torch.Tensor | None = None,
         p: int = 1,
         metadata: pd.DataFrame | None = None,
@@ -133,6 +133,16 @@ class MANTRA(PyroModule):
 
         self.covariates = covariates
         self.view_names = view_names
+
+        # Convert numpy arrays to tensors
+        if isinstance(observations, np.ndarray):
+            observations = torch.tensor(observations, dtype=torch.float32)
+        elif isinstance(observations, list):
+            observations = [
+                torch.tensor(o, dtype=torch.float32) if isinstance(o, np.ndarray) else o
+                for o in observations
+            ]
+
         self.observations = observations
         self.metadata = metadata
         self.index = index
@@ -156,6 +166,18 @@ class MANTRA(PyroModule):
         self.outcome_obs = outcome_obs
         self.p = p
 
+        # Auto-infer n_features if not provided
+        if n_features is None:
+            if isinstance(observations, torch.Tensor):
+                n_features = [observations.shape[-1]]
+            elif isinstance(observations, list) and len(observations) > 0:
+                n_features = [o.shape[-1] for o in observations]
+            else:
+                raise ValueError(
+                    "Cannot infer n_features from observations. "
+                    "Please provide n_features explicitly."
+                )
+
         self.n_features = n_features
         self.a = a
         self.b = b
@@ -165,6 +187,28 @@ class MANTRA(PyroModule):
         self.A2 = A2
         self.A3 = A3
         self.scale_factor = scale_factor
+
+    def __repr__(self) -> str:
+        """Return a human-readable model summary."""
+        n_features_str = ", ".join(
+            f"{name}: {n}" if self.view_names else f"view_{i}: {n}"
+            for i, (name, n) in enumerate(
+                zip(self.view_names or [f"view_{i}" for i in range(len(self.n_features))],
+                    self.n_features)
+            )
+        )
+        device = self.device if self.device is not None else "cpu"
+        lines = [
+            "MANTRA Model",
+            "============",
+            f"  n_views:    {self.n_views}",
+            f"  n_samples:  {self.n_samples}",
+            f"  n_factors:  {self.n_factors}",
+            f"  n_features: {n_features_str}",
+            f"  trained:    {self._trained}",
+            f"  device:     {device}",
+        ]
+        return "\n".join(lines)
 
     def _setup_tensor_data(self) -> torch.Tensor:
         """Setup and preprocess tensor data from observations.
@@ -341,10 +385,10 @@ class MANTRA(PyroModule):
         """
         logger.debug("Setting up training data")
         train_obs = self.tensor_data
-        train_obs = torch.nan_to_num(train_obs)
 
         logger.debug("Computing missing value mask")
         mask_obs = ~torch.isnan(train_obs)
+        train_obs = torch.nan_to_num(train_obs)
 
         if self.outcome_obs is not None:
             outcome_obs = self.outcome_obs.to(self.device)
@@ -396,6 +440,9 @@ class MANTRA(PyroModule):
         else:
             self.tensor_data = self.observations
 
+        # Update n_samples from actual tensor shape
+        self.n_samples = self.tensor_data.shape[0]
+
         train_obs, outcome_obs, mask_obs = self._setup_training_data()
 
         # Handle batch size
@@ -403,7 +450,14 @@ class MANTRA(PyroModule):
             batch_size = self.n_samples
 
         if n_particles is None:
-            n_particles = max(1, 1000 // batch_size)
+            # Vectorized particles > 1 require all sample sites and the
+            # likelihood to broadcast correctly along the particle dimension.
+            # This is only guaranteed for the mini-batch path; default to 1
+            # for full-batch training.
+            if batch_size >= self.n_samples:
+                n_particles = 1
+            else:
+                n_particles = max(1, 1000 // batch_size)
 
         logger.info("Using %d particles", n_particles)
         logger.info("Preparing model and guide...")
@@ -499,6 +553,11 @@ class MANTRA(PyroModule):
 
         self._trained = True
         logger.info("Training complete. Final ELBO: %.2f", history[-1])
+
+        if callbacks is not None:
+            for callback in callbacks:
+                if hasattr(callback, "on_train_end"):
+                    callback.on_train_end(history)
 
         return history, stop_early
 
@@ -668,8 +727,40 @@ class MANTRA(PyroModule):
 
         return A2
 
+    def _normalize_view_idx(self, view: int | str) -> int:
+        """Normalize a view index to an integer.
+
+        Parameters
+        ----------
+        view : int or str
+            View index (integer) or view name (string).
+
+        Returns
+        -------
+        int
+            Integer view index.
+
+        Raises
+        ------
+        ValueError
+            If view name is not found.
+        TypeError
+            If view is not int or str.
+        """
+        if isinstance(view, int):
+            if view < 0 or view >= self.n_views:
+                raise IndexError(f"View index {view} out of range [0, {self.n_views})")
+            logger.debug("Resolved view index %d", view)
+            return view
+        if isinstance(view, str):
+            if self.view_names is not None and view in self.view_names:
+                return self.view_names.index(view)
+            raise ValueError(f"View '{view}' not found in view_names={self.view_names}")
+        raise TypeError(f"Invalid view type: {type(view)}")
+
     def get_feature_embeddings(
         self,
+        view: int | str | None = None,
         factor_idx: int | str | list | None = None,
         as_df: bool = False,
     ) -> torch.Tensor | pd.DataFrame:
@@ -680,6 +771,9 @@ class MANTRA(PyroModule):
 
         Parameters
         ----------
+        view : int, str, optional
+            View index or name. If None, returns all features concatenated
+            across views (original behavior).
         factor_idx : int, str, list, optional
             Index of factors to return. If None, returns all factors.
         as_df : bool, optional
@@ -696,18 +790,26 @@ class MANTRA(PyroModule):
         posterior = self._guide.median()
         A3 = posterior["A3"].detach().cpu()
 
+        # Slice to specific view if requested
+        if view is not None:
+            view_idx = self._normalize_view_idx(view)
+            offsets = [0, *np.cumsum(self.n_features).tolist()]
+            start, end = offsets[view_idx], offsets[view_idx + 1]
+            A3 = A3[start:end]
+            feature_index = self.feature_names[view_idx]
+        else:
+            feature_index = pd.Index(
+                [f for view_features in self.feature_names for f in view_features]
+            )
+
         # Filter factors if requested
         if factor_idx is not None:
             factor_idx = self._normalize_factor_idx(factor_idx)
             A3 = A3[:, factor_idx]
 
         if as_df:
-            # Concatenate all feature names
-            all_features = pd.Index(
-                [f for view_features in self.feature_names for f in view_features]
-            )
             cols = self.factor_names if factor_idx is None else self.factor_names[factor_idx]
-            return pd.DataFrame(A3.numpy(), index=all_features, columns=cols)
+            return pd.DataFrame(A3.numpy(), index=feature_index, columns=cols)
 
         return A3
 
@@ -883,6 +985,159 @@ class MANTRA(PyroModule):
                         raise ValueError(f"Factor '{idx}' not found")
             return result
         raise TypeError(f"Invalid factor_idx type: {type(factor_idx)}")
+
+    # -------------------------------------------------------------------------
+    # Save / Load
+    # -------------------------------------------------------------------------
+
+    def save(self, directory: str) -> None:
+        """Save model to directory (pickle-free).
+
+        Saves metadata as JSON, Pyro parameters as NPZ, and input tensor as NPZ.
+
+        Parameters
+        ----------
+        directory : str
+            Path to the directory where the model will be saved.
+            Created if it does not exist.
+        """
+        import json
+        from pathlib import Path
+
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Metadata
+        metadata = {
+            "version": "0.1.0",
+            "n_features": self.n_features,
+            "n_samples": self.n_samples,
+            "R": self.R,
+            "a": self.a,
+            "b": self.b,
+            "c": self.c,
+            "d": self.d,
+            "p": self.p,
+            "scale_factor": self.scale_factor,
+            "trained": self._trained,
+            "view_names": self.view_names,
+            "device": str(self.device),
+            "sample_names": self.sample_names.tolist(),
+            "slice_names": self.slice_names.tolist(),
+            "feature_names": [fn.tolist() for fn in self.feature_names],
+            "factor_names": self.factor_names.tolist(),
+        }
+        with open(path / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        # 2. Input tensor data
+        if self.tensor_data is not None:
+            np.savez_compressed(
+                path / "data.npz",
+                tensor_data=self.tensor_data.detach().cpu().numpy(),
+            )
+
+        # 3. Pyro param store - save unconstrained parameter values
+        if self._trained:
+            store = pyro.get_param_store()
+            param_arrays = {}
+            for name in store:
+                # Save the unconstrained parameter values
+                param_arrays[name] = store._params[name].detach().cpu().numpy()
+            np.savez_compressed(path / "params.npz", **param_arrays)
+
+        logger.info("Model saved to %s", path)
+
+    @classmethod
+    def load(cls, directory: str, device: str | None = None) -> "MANTRA":
+        """Load a saved model from directory.
+
+        Parameters
+        ----------
+        directory : str
+            Path to the directory containing the saved model.
+        device : str, optional
+            Device to load the model onto. If None, uses the device
+            from the saved metadata.
+
+        Returns
+        -------
+        MANTRA
+            The restored model instance.
+        """
+        import json
+        from pathlib import Path
+
+        path = Path(directory)
+        if not path.exists():
+            raise FileNotFoundError(f"Model directory not found: {path}")
+
+        # 1. Load metadata
+        with open(path / "metadata.json") as f:
+            metadata = json.load(f)
+
+        load_device = device or metadata.get("device", "cpu")
+
+        # 2. Load tensor data
+        data_path = path / "data.npz"
+        if data_path.exists():
+            data = np.load(data_path)
+            tensor_data = torch.tensor(data["tensor_data"], device=load_device)
+        else:
+            tensor_data = None
+
+        # 3. Create model instance
+        model = cls(
+            observations=tensor_data if tensor_data is not None else torch.empty(0),
+            n_features=metadata["n_features"],
+            n_samples=metadata["n_samples"],
+            R=metadata["R"],
+            a=metadata["a"],
+            b=metadata["b"],
+            c=metadata["c"],
+            d=metadata["d"],
+            p=metadata["p"],
+            scale_factor=metadata["scale_factor"],
+            view_names=metadata.get("view_names"),
+            device=load_device,
+            use_gpu=False,
+        )
+        model.tensor_data = tensor_data
+
+        # Restore names if saved
+        if "sample_names" in metadata:
+            model.sample_names = metadata["sample_names"]
+        if "slice_names" in metadata:
+            model.slice_names = metadata["slice_names"]
+        if "feature_names" in metadata:
+            model.feature_names = metadata["feature_names"]
+        if "factor_names" in metadata:
+            model.factor_names = metadata["factor_names"]
+
+        # 4. Restore Pyro param store and guide
+        params_path = path / "params.npz"
+        if params_path.exists() and metadata.get("trained", False):
+            model._setup_model_guide()
+
+            pyro.clear_param_store()
+            saved_params = np.load(params_path)
+
+            # Run the guide once to register all params with correct constraints
+            dummy_obs = tensor_data
+            dummy_mask = torch.ones_like(tensor_data)
+            model._guide(dummy_obs, None, dummy_mask, None, None, model.scale_factor)
+
+            # Overwrite unconstrained parameter data in-place
+            store = pyro.get_param_store()
+            for name in saved_params.files:
+                if name in store._params:
+                    value = torch.tensor(saved_params[name], device=load_device)
+                    store._params[name].data.copy_(value)
+
+            model._trained = True
+
+        logger.info("Model loaded from %s", path)
+        return model
 
 
 class MANTRAModel(PyroModule):
@@ -1086,8 +1341,10 @@ class MANTRAModel(PyroModule):
                     ).to(self.device)
 
         # Reconstruct tensor and sample observations
+        # Use ellipsis notation to handle the extra particle dimension when
+        # vectorize_particles=True and n_particles > 1.
         reconstruction = torch.einsum(
-            "ir,jr,kr->ijk",
+            "...ir,...jr,...kr->...ijk",
             self.output_dict["A1"],
             self.output_dict["A2"],
             self.output_dict["A3"],

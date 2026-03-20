@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import scanpy as sc
 import torch
 from scipy import stats
 from sklearn.metrics import silhouette_score
@@ -20,21 +19,23 @@ logger = logging.getLogger(__name__)
 
 
 def rmse_loss(yhat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Compute Root Mean Squared Error.
+    """Compute Root Mean Squared Error, ignoring NaN entries.
 
     Parameters
     ----------
     yhat : torch.Tensor
         Predicted values
     y : torch.Tensor
-        True values
+        True values (may contain NaN for missing groups)
 
     Returns
     -------
     torch.Tensor
         RMSE value
     """
-    return torch.sqrt(torch.mean((yhat - y) ** 2))
+    diff = yhat - y
+    mask = ~torch.isnan(diff)
+    return torch.sqrt(torch.mean(diff[mask] ** 2))
 
 
 def accuracy_outcome(
@@ -84,6 +85,8 @@ def compute_silhouette_score(
     float
         Silhouette score
     """
+    import scanpy as sc
+
     factors = samples.copy()
     factors = factors.add_prefix("Factor")
     factors[metadata_col] = metadata_array.to_list()

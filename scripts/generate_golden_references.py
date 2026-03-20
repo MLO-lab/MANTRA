@@ -137,7 +137,7 @@ def generate_golden_references() -> dict:
 
 def main():
     """Main function to generate and save golden references."""
-    output_path = Path(__file__).parent.parent / "tests" / "golden_references.pkl"
+    output_path = Path(__file__).parent.parent / "mantra" / "tests" / "golden_references.pkl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     logger.info("Generating golden references...")

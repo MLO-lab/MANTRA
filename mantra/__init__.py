@@ -24,6 +24,7 @@ import logging
 
 from mantra import analysis as tl
 from mantra import plotting as pl
+from mantra import preprocessing as pp
 from mantra.data.synthetic import DataGenerator
 from mantra.model.core import MANTRA
 from mantra.model.core import MANTRAModel
@@ -39,6 +40,7 @@ __all__ = [
     "set_all_seeds",
     "tl",  # Tools/analysis module (like scanpy.tl)
     "pl",  # Plotting module (like scanpy.pl)
+    "pp",  # Preprocessing module (like scanpy.pp)
 ]
 
 # Configure logging

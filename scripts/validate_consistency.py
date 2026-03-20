@@ -45,7 +45,7 @@ def compute_absolute_correlation(a: torch.Tensor, b: torch.Tensor) -> float:
 def main():
     """Run consistency validation."""
     # Load golden references
-    golden_path = Path(__file__).parent.parent / "tests" / "golden_references.pkl"
+    golden_path = Path(__file__).parent.parent / "mantra" / "tests" / "golden_references.pkl"
 
     if not golden_path.exists():
         logger.error("=" * 60)

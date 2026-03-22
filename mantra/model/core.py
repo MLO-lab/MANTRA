@@ -210,20 +210,79 @@ class MANTRA(PyroModule):
         ]
         return "\n".join(lines)
 
+    def _promote_matrix_to_tensor(
+        self, matrix: torch.Tensor, n_slices: int
+    ) -> torch.Tensor:
+        """Promote a 2D matrix to a 3D tensor with NaN padding.
+
+        The matrix is placed in the first slice; all other slices are filled
+        with NaN so they are masked out during training.
+
+        Parameters
+        ----------
+        matrix : torch.Tensor
+            2D tensor of shape (n_samples, n_features)
+        n_slices : int
+            Number of slices in the target 3D tensor
+
+        Returns
+        -------
+        torch.Tensor
+            3D tensor of shape (n_samples, n_slices, n_features) with NaN padding
+        """
+        n_samples, n_features = matrix.shape
+        tensor_3d = torch.full((n_samples, n_slices, n_features), float("nan"))
+        tensor_3d[:, 0, :] = matrix
+        return tensor_3d
+
     def _setup_tensor_data(self) -> torch.Tensor:
         """Setup and preprocess tensor data from observations.
+
+        Handles three cases:
+        - All 3D tensors: concatenated along feature dimension
+        - Mixed 2D/3D: matrices are promoted to 3D with NaN padding
+        - All DataFrames: legacy path using metadata index
 
         Returns
         -------
         torch.Tensor
             The processed tensor data
         """
-        if all(isinstance(x, torch.Tensor) for x in self.observations) and all(
-            len(x.shape) == 3 for x in self.observations
-        ):
-            self.tensor_data = torch.cat(self.observations, 2)
+        if all(isinstance(x, torch.Tensor) for x in self.observations):
+            ndims = [len(x.shape) for x in self.observations]
 
-        if all(isinstance(x, pd.DataFrame) for x in self.observations):
+            if all(d == 3 for d in ndims):
+                # All 3D: concatenate along features
+                self.tensor_data = torch.cat(self.observations, 2)
+            elif any(d == 2 for d in ndims) and any(d == 3 for d in ndims):
+                # Mixed 2D/3D: promote matrices to 3D with NaN padding
+                n_slices = max(x.shape[1] for x in self.observations if len(x.shape) == 3)
+                promoted = []
+                for x in self.observations:
+                    if len(x.shape) == 2:
+                        logger.info(
+                            "Promoting matrix view (%d x %d) to 3D tensor "
+                            "(%d x %d x %d) with NaN padding",
+                            x.shape[0], x.shape[1],
+                            x.shape[0], n_slices, x.shape[1],
+                        )
+                        promoted.append(self._promote_matrix_to_tensor(x, n_slices))
+                    else:
+                        promoted.append(x)
+                self.tensor_data = torch.cat(promoted, 2)
+            elif all(d == 2 for d in ndims):
+                raise ValueError(
+                    "All observations are 2D matrices. At least one 3D tensor is "
+                    "required for mixed-order factorization. For matrix-only "
+                    "factorization, reshape to 3D with a single slice dimension."
+                )
+            else:
+                raise ValueError(
+                    f"Observations have unsupported dimensions: {ndims}. "
+                    "Expected 2D matrices and/or 3D tensors."
+                )
+
+        elif all(isinstance(x, pd.DataFrame) for x in self.observations):
             if self.metadata is None:
                 logger.warning("Metadata required for DataFrame input")
             else:
